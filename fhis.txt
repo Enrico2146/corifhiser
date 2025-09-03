@@ -1,43 +1,486 @@
--- 🔹 CONFIG
-local WEBHOOK_URL = "https://discord.com/api/webhooks/1401351433688977508/nhlle6MOutCekvXpPigGeUZIs9prWpQS74YzjCP9CEK43nQFnDnmPt8ZoTUTUi65lTB4"
+-- FishIt Trade+Webhook GUI (Minimizable Bubble)
+-- Cara pakai singkat:
+-- 1) Inject di Delta. GUI muncul. Klik menu Trade / Webhook.
+-- 2) Untuk Instant Trade: isi Remote Path (contoh: ReplicatedStorage.Remotes.TradeFish)
+--    dan Args (format JSON array: ["Lava Butterfly", 1]) lalu tekan "Test Trade" atau toggle Auto-Sell.
+-- 3) Untuk Webhook: isi Discord Webhook URL lalu toggle Logger.
+-- 4) Tekan tombol minimize (ikon '-') untuk hide GUI -> muncul bubble. Klik bubble untuk restore.
 
 local HttpService = game:GetService("HttpService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local UserInputService = game:GetService("UserInputService")
 
--- Fungsi kirim pesan ke Discord
-local function sendToDiscord(content)
-    local data = {
-        ["content"] = content
-    }
-    local jsonData = HttpService:JSONEncode(data)
-    HttpService:PostAsync(WEBHOOK_URL, jsonData, Enum.HttpContentType.ApplicationJson)
+-- SAFE parent: prefer CoreGui in exploit env
+local CoreGui = game:GetService("CoreGui")
+
+-- helper: create UI quick
+local function create(cls, props)
+    local obj = Instance.new(cls)
+    for k,v in pairs(props or {}) do obj[k] = v end
+    return obj
 end
 
--- Hook RemoteEvent & RemoteFunction
-local function hookRemote(obj)
+-- -------------------------
+-- Helpers: find object by path like "ReplicatedStorage.Remotes.TradeFish"
+-- -------------------------
+local services = {
+    ReplicatedStorage = game:GetService("ReplicatedStorage"),
+    Players = game:GetService("Players"),
+    Workspace = game:GetService("Workspace"),
+    StarterGui = game:GetService("StarterGui"),
+    CoreGui = game:GetService("CoreGui"),
+    Lighting = game:GetService("Lighting"),
+    ServerStorage = game:GetService("ServerStorage"),
+}
+
+local function getObjectFromPath(path)
+    if not path or path == "" then return nil end
+    local tokens = {}
+    for token in string.gmatch(path, "[^%.]+") do table.insert(tokens, token) end
+    local idx = 1
+    if tokens[1] == "game" then idx = 2 end
+    local current = game
+    for i = idx, #tokens do
+        local name = tokens[i]
+        if services[name] then
+            current = services[name]
+        else
+            if current:FindFirstChild(name) then
+                current = current[name]
+            else
+                return nil
+            end
+        end
+    end
+    return current
+end
+
+-- parse args string: tries JSONDecode, else split by comma
+local function parseArgsString(s)
+    if not s or s == "" then return {} end
+    local ok, res = pcall(function() return HttpService:JSONDecode(s) end)
+    if ok and type(res) == "table" then return res end
+    -- fallback: split by comma and trim
+    local out = {}
+    for part in string.gmatch(s, '([^,]+)') do
+        part = part:gsub("^%s*(.-)%s*$", "%1")
+        -- if numeric?
+        local n = tonumber(part)
+        if n then table.insert(out, n) else table.insert(out, part) end
+    end
+    return out
+end
+
+-- -------------------------
+-- Core UI
+-- -------------------------
+local screenGui = create("ScreenGui", {
+    Name = "FishItToolGUI",
+    ResetOnSpawn = false,
+})
+screenGui.Parent = CoreGui
+
+-- Main Window
+local mainFrame = create("Frame", {
+    Name = "Main",
+    Parent = screenGui,
+    Size = UDim2.new(0, 460, 0, 300),
+    Position = UDim2.new(0.5, -230, 0.25, -150),
+    BackgroundColor3 = Color3.fromRGB(28, 28, 30),
+    BorderSizePixel = 0,
+})
+local uicorner = create("UICorner", {Parent = mainFrame, CornerRadius = UDim.new(0,8)})
+
+-- Titlebar
+local titleBar = create("Frame", {
+    Parent = mainFrame,
+    Size = UDim2.new(1,0,0,36),
+    BackgroundTransparency = 1
+})
+local titleLabel = create("TextLabel", {
+    Parent = titleBar,
+    Text = "FishIt • Trade & Webhook",
+    Size = UDim2.new(1, -80, 1, 0),
+    Position = UDim2.new(0, 12, 0, 0),
+    BackgroundTransparency = 1,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextColor3 = Color3.fromRGB(230,230,230),
+    Font = Enum.Font.SourceSansBold,
+    TextSize = 16
+})
+local btnMin = create("TextButton", {
+    Parent = titleBar,
+    Size = UDim2.new(0, 28, 0, 20),
+    Position = UDim2.new(1, -68, 0, 8),
+    Text = "-",
+    BackgroundColor3 = Color3.fromRGB(55,55,55),
+    TextColor3 = Color3.fromRGB(230,230,230),
+    BorderSizePixel = 0,
+})
+create("UICorner", {Parent = btnMin, CornerRadius = UDim.new(0,6)})
+local btnClose = create("TextButton", {
+    Parent = titleBar,
+    Size = UDim2.new(0, 28, 0, 20),
+    Position = UDim2.new(1, -32, 0, 8),
+    Text = "X",
+    BackgroundColor3 = Color3.fromRGB(170,60,60),
+    TextColor3 = Color3.fromRGB(255,255,255),
+    BorderSizePixel = 0,
+})
+create("UICorner", {Parent = btnClose, CornerRadius = UDim.new(0,6)})
+
+-- Left menu list
+local menuFrame = create("Frame", {
+    Parent = mainFrame,
+    Size = UDim2.new(0, 140, 1, -36),
+    Position = UDim2.new(0, 0, 0, 36),
+    BackgroundColor3 = Color3.fromRGB(22,22,24),
+})
+create("UICorner", {Parent = menuFrame, CornerRadius = UDim.new(0,8)})
+
+local function makeMenuButton(text, posY)
+    local b = create("TextButton", {
+        Parent = menuFrame,
+        Size = UDim2.new(1, -12, 0, 40),
+        Position = UDim2.new(0, 6, 0, posY),
+        BackgroundColor3 = Color3.fromRGB(35,35,38),
+        Text = text,
+        TextColor3 = Color3.fromRGB(220,220,220),
+        BorderSizePixel = 0,
+        Font = Enum.Font.SourceSans,
+        TextSize = 14,
+    })
+    create("UICorner", {Parent = b, CornerRadius = UDim.new(0,6)})
+    return b
+end
+
+local btnTrade = makeMenuButton("Trade", 10)
+local btnWebhook = makeMenuButton("Webhook", 60)
+local btnSettings = makeMenuButton("Settings", 110)
+
+-- Right content area
+local content = create("Frame", {
+    Parent = mainFrame,
+    Size = UDim2.new(1, -150, 1, -46),
+    Position = UDim2.new(0, 150, 0, 36),
+    BackgroundTransparency = 1
+})
+
+-- Content pages
+local pages = {}
+
+-- Trade Page
+local tradePage = create("Frame", {Parent = content, Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1})
+pages.trade = tradePage
+
+local lblRemote = create("TextLabel", {
+    Parent = tradePage, Text = "Remote Path (ex: ReplicatedStorage.Remotes.TradeFish)",
+    Size = UDim2.new(1, -10, 0, 20), Position = UDim2.new(0, 0, 0, 6),
+    BackgroundTransparency = 1, TextColor3 = Color3.fromRGB(200,200,200), TextSize = 13, Font = Enum.Font.SourceSans
+})
+local txtRemote = create("TextBox", {
+    Parent = tradePage,
+    Text = "",
+    Size = UDim2.new(1, -10, 0, 30),
+    Position = UDim2.new(0, 0, 0, 28),
+    ClearTextOnFocus = false,
+    BackgroundColor3 = Color3.fromRGB(40,40,42),
+    TextColor3 = Color3.fromRGB(230,230,230),
+    TextWrapped = true,
+})
+create("UICorner",{Parent = txtRemote, CornerRadius = UDim.new(0,6)})
+
+local lblArgs = create("TextLabel", {
+    Parent = tradePage, Text = "Args (JSON array or comma list) e.g. [\"Lava Butterfly\",1]",
+    Size = UDim2.new(1, -10, 0, 20), Position = UDim2.new(0, 0, 0, 66),
+    BackgroundTransparency = 1, TextColor3 = Color3.fromRGB(200,200,200), TextSize = 13, Font = Enum.Font.SourceSans
+})
+local txtArgs = create("TextBox", {
+    Parent = tradePage,
+    Text = "[]",
+    Size = UDim2.new(1, -10, 0, 30),
+    Position = UDim2.new(0, 0, 0, 88),
+    ClearTextOnFocus = false,
+    BackgroundColor3 = Color3.fromRGB(40,40,42),
+    TextColor3 = Color3.fromRGB(230,230,230),
+})
+
+local btnTestTrade = create("TextButton", {
+    Parent = tradePage,
+    Text = "Test Trade Once",
+    Size = UDim2.new(0, 0, 0, 36),
+    Position = UDim2.new(0, 0, 0, 130),
+    BackgroundColor3 = Color3.fromRGB(60,140,80),
+    TextColor3 = Color3.fromRGB(255,255,255)
+})
+create("UICorner",{Parent = btnTestTrade, CornerRadius = UDim.new(0,6)})
+local toggleAutoSell = create("TextButton", {
+    Parent = tradePage,
+    Text = "Auto-Sell: OFF",
+    Size = UDim2.new(0, 160, 0, 36),
+    Position = UDim2.new(0, 170, 0, 130),
+    BackgroundColor3 = Color3.fromRGB(70,70,72),
+    TextColor3 = Color3.fromRGB(220,220,220)
+})
+create("UICorner",{Parent = toggleAutoSell, CornerRadius = UDim.new(0,6)})
+
+-- Webhook Page
+local webhookPage = create("Frame", {Parent = content, Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1, Visible = false})
+pages.webhook = webhookPage
+
+local lblHook = create("TextLabel", {
+    Parent = webhookPage, Text = "Discord Webhook URL",
+    Size = UDim2.new(1, -10, 0, 20), Position = UDim2.new(0, 0, 0, 6),
+    BackgroundTransparency = 1, TextColor3 = Color3.fromRGB(200,200,200), TextSize = 13, Font = Enum.Font.SourceSans
+})
+local txtWebhook = create("TextBox", {
+    Parent = webhookPage,
+    Text = "",
+    Size = UDim2.new(1, -10, 0, 36),
+    Position = UDim2.new(0, 0, 0, 28),
+    ClearTextOnFocus = false,
+    BackgroundColor3 = Color3.fromRGB(40,40,42),
+    TextColor3 = Color3.fromRGB(230,230,230),
+})
+create("UICorner",{Parent = txtWebhook, CornerRadius = UDim.new(0,6)})
+
+local lblWebhookHint = create("TextLabel", {
+    Parent = webhookPage,
+    Text = "When enabled, every new item in Backpack will be posted to webhook.",
+    Size = UDim2.new(1, -10, 0, 30),
+    Position = UDim2.new(0, 0, 0, 70),
+    BackgroundTransparency = 1,
+    TextColor3 = Color3.fromRGB(190,190,190),
+    TextSize = 12,
+    TextWrapped = true,
+    Font = Enum.Font.SourceSans
+})
+
+local toggleWebhook = create("TextButton", {
+    Parent = webhookPage,
+    Text = "Webhook Logger: OFF",
+    Size = UDim2.new(0, 200, 0, 40),
+    Position = UDim2.new(0, 0, 0, 110),
+    BackgroundColor3 = Color3.fromRGB(70,70,72),
+    TextColor3 = Color3.fromRGB(220,220,220)
+})
+create("UICorner",{Parent = toggleWebhook, CornerRadius = UDim.new(0,8)})
+
+-- Settings page (small)
+local settingsPage = create("Frame", {Parent = content, Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1, Visible = false})
+pages.settings = settingsPage
+local lblInfo = create("TextLabel", {
+    Parent = settingsPage,
+    Text = "Tips:\n- Find remote via Remote Spy script earlier.\n- Use JSON array in Args box.\n- If server enforces timer, instant trade may not work server-side.",
+    Size = UDim2.new(1, -10, 1, -10),
+    Position = UDim2.new(0,0,0,6),
+    BackgroundTransparency = 1,
+    TextColor3 = Color3.fromRGB(200,200,200),
+    TextWrapped = true,
+    Font = Enum.Font.SourceSans
+})
+
+-- bubble (minimized)
+local bubble = create("TextButton", {
+    Parent = screenGui,
+    Size = UDim2.new(0, 48, 0, 48),
+    Position = UDim2.new(0.02, 0, 0.85, 0),
+    BackgroundColor3 = Color3.fromRGB(65,65,65),
+    Text = "F",
+    TextColor3 = Color3.fromRGB(255,255,255),
+    Visible = false,
+    BorderSizePixel = 0
+})
+create("UICorner",{Parent = bubble, CornerRadius = UDim.new(1,0)})
+
+-- status label
+local statusLabel = create("TextLabel", {
+    Parent = mainFrame, Size = UDim2.new(1, -160, 0, 18), Position = UDim2.new(0,150,1,-22),
+    BackgroundTransparency = 1, Text = "Status: Idle", TextColor3 = Color3.fromRGB(180,180,180), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.SourceSans, TextSize = 13
+})
+
+-- -------------------------
+-- UI Behaviour: menu switching
+-- -------------------------
+local function showPage(name)
+    for k,v in pairs(pages) do v.Visible = (k == name) end
+end
+btnTrade.MouseButton1Click:Connect(function() showPage("trade") end)
+btnWebhook.MouseButton1Click:Connect(function() showPage("webhook") end)
+btnSettings.MouseButton1Click:Connect(function() showPage("settings") end)
+
+-- -------------------------
+-- Dragging for mainFrame and bubble
+-- -------------------------
+local dragging
+local dragStart
+local startPos
+
+local function makeDraggable(gui)
+    gui.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos = gui.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    gui.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Position - dragStart
+            gui.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+end
+
+makeDraggable(titleBar)
+makeDraggable(bubble)
+
+-- minimize / restore
+btnMin.MouseButton1Click:Connect(function()
+    mainFrame.Visible = false
+    bubble.Visible = true
+end)
+btnClose.MouseButton1Click:Connect(function()
+    screenGui:Destroy()
+end)
+bubble.MouseButton1Click:Connect(function()
+    mainFrame.Visible = true
+    bubble.Visible = false
+end)
+
+-- -------------------------
+-- Feature logic: Trade & Webhook
+-- -------------------------
+local autoSellEnabled = false
+local webhookEnabled = false
+local webhookConn = nil
+
+local function updateStatus(text)
+    statusLabel.Text = "Status: " .. text
+end
+
+-- trade caller
+local function callRemoteByPath(path, args)
+    local obj = getObjectFromPath(path)
+    if not obj then
+        return false, "Remote not found: " .. tostring(path)
+    end
     if obj:IsA("RemoteEvent") then
-        local old; old = hookfunction(obj.FireServer, function(self, ...)
-            local args = {...}
-            local str = "[RemoteEvent] " .. self.Name .. " | Args: " .. HttpService:JSONEncode(args)
-            sendToDiscord(str)
-            return old(self, unpack(args))
-        end)
+        local ok, err = pcall(function() obj:FireServer(unpack(args or {})) end)
+        return ok, err
     elseif obj:IsA("RemoteFunction") then
-        local old; old = hookfunction(obj.InvokeServer, function(self, ...)
-            local args = {...}
-            local str = "[RemoteFunction] " .. self.Name .. " | Args: " .. HttpService:JSONEncode(args)
-            sendToDiscord(str)
-            return old(self, unpack(args))
+        local ok, res = pcall(function() return obj:InvokeServer(unpack(args or {})) end)
+        return ok, res
+    else
+        return false, "Object is not RemoteEvent/Function: " .. tostring(path)
+    end
+end
+
+btnTestTrade.MouseButton1Click:Connect(function()
+    local path = txtRemote.Text
+    local args = parseArgsString(txtArgs.Text)
+    updateStatus("Testing trade...")
+    local ok, res = callRemoteByPath(path, args)
+    if ok then
+        updateStatus("Test Trade: success")
+        pcall(function() HttpService:PostAsync(txtWebhook.Text, HttpService:JSONEncode({content="Test Trade invoked: " .. tostring(path)}), Enum.HttpContentType.ApplicationJson) end)
+    else
+        updateStatus("Test Trade failed: " .. tostring(res))
+    end
+end)
+
+toggleAutoSell.MouseButton1Click:Connect(function()
+    autoSellEnabled = not autoSellEnabled
+    toggleAutoSell.Text = "Auto-Sell: " .. (autoSellEnabled and "ON" or "OFF")
+    toggleAutoSell.BackgroundColor3 = autoSellEnabled and Color3.fromRGB(60,140,80) or Color3.fromRGB(70,70,72)
+    updateStatus("Auto-Sell " .. (autoSellEnabled and "enabled" or "disabled"))
+end)
+
+-- Auto-sell worker (checks Backpack every 3s)
+spawn(function()
+    while task.wait(3) do
+        if autoSellEnabled then
+            local path = txtRemote.Text
+            local argsTemplate = txtArgs.Text
+            -- iterate player's Backpack items
+            for _, item in ipairs(LocalPlayer.Backpack:GetChildren()) do
+                -- you can customize: include only fish names etc
+                local name = item.Name
+                -- build args: if template is '[]' or contains placeholder, try to replace
+                local args = parseArgsString(argsTemplate)
+                -- if args empty, set default to { item.Name, 1 }
+                if #args == 0 then
+                    args = { name, 1 }
+                else
+                    -- if user used placeholder "$ITEM" replace
+                    for i,v in ipairs(args) do
+                        if type(v) == "string" and v:match("%$ITEM") then
+                            args[i] = name
+                        end
+                    end
+                end
+                local ok,res = callRemoteByPath(path, args)
+                if ok then
+                    updateStatus("Auto-sold: " .. name)
+                    -- tiny pause between sells
+                    task.wait(0.35)
+                else
+                    updateStatus("Auto-sell failed: " .. tostring(res))
+                end
+            end
+        end
+    end
+end)
+
+-- Webhook Logger
+local function sendDiscord(content)
+    local url = txtWebhook.Text
+    if not url or url == "" then
+        updateStatus("Webhook URL kosong")
+        return false, "No URL"
+    end
+    local payload = { content = content }
+    local ok,err = pcall(function()
+        HttpService:PostAsync(url, HttpService:JSONEncode(payload), Enum.HttpContentType.ApplicationJson)
+    end)
+    return ok, err
+end
+
+local function startWebhookLogger()
+    if webhookConn then webhookConn:Disconnect() webhookConn = nil end
+    webhookConn = LocalPlayer.Backpack.ChildAdded:Connect(function(item)
+        local msg = ("🎣 New item: **%s** - Player: %s"):format(item.Name, LocalPlayer.Name)
+        spawn(function()
+            local ok,err = sendDiscord(msg)
+            if not ok then updateStatus("Webhook send failed") end
         end)
-    end
+    end)
+    updateStatus("Webhook logger ON")
+end
+local function stopWebhookLogger()
+    if webhookConn then webhookConn:Disconnect() webhookConn = nil end
+    updateStatus("Webhook logger OFF")
 end
 
--- Hook semua remote yang ada sekarang
-for _, v in pairs(ReplicatedStorage:GetDescendants()) do
-    if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
-        hookRemote(v)
-    end
-end
+toggleWebhook.MouseButton1Click:Connect(function()
+    webhookEnabled = not webhookEnabled
+    toggleWebhook.Text = "Webhook Logger: " .. (webhookEnabled and "ON" or "OFF")
+    toggleWebhook.BackgroundColor3 = webhookEnabled and Color3.fromRGB(60,140,80) or Color3.fromRGB(70,70,72)
+    if webhookEnabled then startWebhookLogger() else stopWebhookLogger() end
+end)
 
--- Hook remote baru kalau muncul belakangan
-ReplicatedStorage.DescendantAdded:Connect(hookRemote)
+-- initial small notification so user knows script loaded
+pcall(function()
+    game.StarterGui:SetCore("SendNotification", {
+        Title = "FishIt Tool",
+        Text = "GUI loaded — klik '-' untuk minimize",
+        Duration = 4
+    })
+end)
+updateStatus("Ready")
